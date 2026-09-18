@@ -44,6 +44,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   double currentSpeed = 0.0;
   Position? currentPosition;
   Timer? syncTimer;
+  StreamSubscription? _scanSubscription;
 
   @override
   void initState() {
@@ -61,7 +62,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     await [
       Permission.bluetoothScan,
       Permission.bluetoothConnect,
-      Permission.location,
+      Permission.locationWhenInUse,
     ].request();
   }
 
@@ -72,63 +73,99 @@ class _DashboardScreenState extends State<DashboardScreen> {
         distanceFilter: 1,
       ),
     ).listen((Position pos) {
-      setState(() {
-        currentPosition = pos;
-        currentSpeed = (pos.speed * 3.6).clamp(0.0, 120.0);
-      });
+      if (mounted) {
+        setState(() {
+          currentPosition = pos;
+          currentSpeed = (pos.speed * 3.6).clamp(0.0, 120.0);
+        });
+      }
     });
   }
 
   Future<void> _connectToBike() async {
-    setState(() => isConnecting = true);
-    
-    try {
-      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
+    if (isConnecting) return;
 
-      FlutterBluePlus.scanResults.listen((results) async {
+    setState(() => isConnecting = true);
+
+    try {
+      // Clean up previous scan if running
+      await FlutterBluePlus.stopScan();
+      await _scanSubscription?.cancel();
+
+      // Start fresh scan with 6-second timeout
+      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 6));
+
+      _scanSubscription = FlutterBluePlus.scanResults.listen((results) async {
         for (ScanResult r in results) {
-          if (r.device.platformName.contains("M1365") || 
-              r.advertisementData.serviceUuids.contains(Guid(serviceUUID))) {
-            
+          String deviceName = r.device.platformName.toUpperCase();
+          String advName = r.advertisementData.advName.toUpperCase();
+          List<String> uuids = r.advertisementData.serviceUuids.map((e) => e.toString().toLowerCase()).toList();
+
+          bool isTargetBike = deviceName.contains("M1365") ||
+              advName.contains("M1365") ||
+              uuids.contains(serviceUUID.toLowerCase());
+
+          if (isTargetBike) {
             await FlutterBluePlus.stopScan();
+            await _scanSubscription?.cancel();
+
             bikeDevice = r.device;
-            await bikeDevice!.connect();
-            
-            setState(() {
-              isConnected = true;
-              isConnecting = false;
-            });
+            await bikeDevice!.connect(timeout: const Duration(seconds: 10));
+
+            if (mounted) {
+              setState(() {
+                isConnected = true;
+                isConnecting = false;
+              });
+            }
 
             _setupNotify();
-            break;
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text("Bike Connected Successfully!")),
+            );
+            return;
           }
         }
       });
+
+      // Reset loading state after scan timeout
+      Future.delayed(const Duration(seconds: 7), () {
+        if (mounted && isConnecting && !isConnected) {
+          setState(() => isConnecting = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("Bike not found. Ensure Bike is ON and close by.")),
+          );
+        }
+      });
     } catch (e) {
-      setState(() => isConnecting = false);
+      if (mounted) setState(() => isConnecting = false);
       debugPrint("Connection error: $e");
     }
   }
 
   void _setupNotify() async {
     if (bikeDevice == null) return;
-    List<BluetoothService> services = await bikeDevice!.discoverServices();
-    
-    for (BluetoothService service in services) {
-      if (service.uuid.toString() == serviceUUID) {
-        for (BluetoothCharacteristic c in service.characteristics) {
-          if (c.uuid.toString() == notifyUUID) {
-            await c.setNotifyValue(true);
-            c.lastValueStream.listen((value) {
-              if (value.isNotEmpty) {
-                setState(() {
-                  batteryPercent = value.length > 8 ? value[8] : batteryPercent;
-                });
-              }
-            });
+    try {
+      List<BluetoothService> services = await bikeDevice!.discoverServices();
+
+      for (BluetoothService service in services) {
+        if (service.uuid.toString().toLowerCase() == serviceUUID.toLowerCase()) {
+          for (BluetoothCharacteristic c in service.characteristics) {
+            if (c.uuid.toString().toLowerCase() == notifyUUID.toLowerCase()) {
+              await c.setNotifyValue(true);
+              c.lastValueStream.listen((value) {
+                if (value.isNotEmpty && mounted) {
+                  setState(() {
+                    batteryPercent = value.length > 8 ? value[8] : batteryPercent;
+                  });
+                }
+              });
+            }
           }
         }
       }
+    } catch (e) {
+      debugPrint("Notify setup error: $e");
     }
   }
 
@@ -155,6 +192,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   @override
   void dispose() {
+    _scanSubscription?.cancel();
     syncTimer?.cancel();
     bikeDevice?.disconnect();
     super.dispose();
@@ -184,7 +222,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 title: Text(isConnected ? "Bike Connected" : "Bike Disconnected"),
                 subtitle: Text(isConnected ? "Receiving live telemetry" : "Tap button to search"),
                 trailing: isConnecting
-                    ? const CircularProgressIndicator()
+                    ? const SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: CircularProgressIndicator(strokeWidth: 2.5),
+                      )
                     : ElevatedButton(
                         onPressed: isConnected ? null : _connectToBike,
                         child: Text(isConnected ? "Active" : "Connect"),
