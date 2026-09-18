@@ -22,14 +22,8 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Create Base Project Structure
+      - name: Create Base Project
         run: flutter create --org com.ebike .
-
-      - name: Fix Android MinSDK and Config
-        run: |
-          sed -i 's/minSdk = .*/minSdk = 21/' android/app/build.gradle.kts || true
-          sed -i 's/minSdkVersion .*/minSdkVersion 21/' android/app/build.gradle || true
-          sed -i 's/flutter.minSdkVersion/21/' android/app/build.gradle || true
 
       - name: Configure Android Manifest Permissions
         run: |
@@ -42,7 +36,7 @@ jobs:
               <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
               <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
               <uses-permission android:name="android.permission.INTERNET" />
-              
+
               <application
                   android:label="ebike_app"
                   android:name="${applicationName}"
@@ -72,10 +66,49 @@ jobs:
           </manifest>
           EOF
 
+      - name: Set Android MinSdk
+        run: |
+          if [ -f android/app/build.gradle ]; then
+            sed -i 's/minSdkVersion .*/minSdkVersion 21/' android/app/build.gradle
+          fi
+          if [ -f android/app/build.gradle.kts ]; then
+            sed -i 's/minSdk = .*/minSdk = 21/' android/app/build.gradle.kts
+          fi
+
+      - name: Set compileSdk and targetSdk
+        run: |
+          if [ -f android/app/build.gradle ]; then
+            sed -i 's/compileSdkVersion .*/compileSdkVersion 35/' android/app/build.gradle
+            sed -i 's/targetSdkVersion .*/targetSdkVersion 35/' android/app/build.gradle
+          fi
+          if [ -f android/app/build.gradle.kts ]; then
+            sed -i 's/compileSdk = .*/compileSdk = 35/' android/app/build.gradle.kts
+            sed -i 's/targetSdk = .*/targetSdk = 35/' android/app/build.gradle.kts
+          fi
+
+      - name: Enable Core Library Desugaring
+        run: |
+          if [ -f android/app/build.gradle ]; then
+            if ! grep -q "coreLibraryDesugaringEnabled" android/app/build.gradle; then
+              sed -i '/compileOptions {/a\        coreLibraryDesugaringEnabled true' android/app/build.gradle
+            fi
+            if ! grep -q "desugar_jdk_libs" android/app/build.gradle; then
+              sed -i '/dependencies {/a\    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.4"' android/app/build.gradle
+            fi
+          fi
+          if [ -f android/app/build.gradle.kts ]; then
+            if ! grep -q "isCoreLibraryDesugaringEnabled" android/app/build.gradle.kts; then
+              sed -i '/compileOptions {/a\        isCoreLibraryDesugaringEnabled = true' android/app/build.gradle.kts
+            fi
+            if ! grep -q "desugar_jdk_libs" android/app/build.gradle.kts; then
+              sed -i '/dependencies {/a\    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")' android/app/build.gradle.kts
+            fi
+          fi
+
       - name: Get Dependencies
         run: flutter pub get
 
-      - name: Build Android Release APK
+      - name: Build APK
         run: flutter build apk --release --no-tree-shake-icons
 
       - name: Upload APK Artifact
