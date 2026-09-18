@@ -5,8 +5,12 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:permission_handler/permission_handler.dart';
+import 'package:url_launcher/url_launcher.dart';
 
-void main() => runApp(const EBikeApp());
+void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const EBikeApp());
+}
 
 class EBikeApp extends StatelessWidget {
   const EBikeApp({super.key});
@@ -14,11 +18,12 @@ class EBikeApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'E-Bike Tracker',
+      title: 'E-Bike Controller',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF121212),
+        scaffoldBackgroundColor: const Color(0xFF0F172A),
         primaryColor: Colors.tealAccent,
+        cardColor: const Color(0xFF1E293B),
       ),
       home: const DashboardScreen(),
     );
@@ -33,15 +38,24 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
+  // BLE UUIDs
   final String serviceUUID = "0000fff0-0000-1000-8000-00805f9b34fb";
   final String notifyUUID = "0000fff1-0000-1000-8000-00805f9b34fb";
-  final String vpsUrl = "http://93.127.133.163:3000/api/update-location";
+  final String writeUUID = "0000fff2-0000-1000-8000-00805f9b34fb";
+
+  // Backend Endpoints
+  final String vpsSyncUrl = "http://93.127.133.163:3000/api/update-location";
+  final String liveMapUrl = "http://93.127.133.163:3000/api/live-status";
 
   BluetoothDevice? bikeDevice;
+  BluetoothCharacteristic? writeCharacteristic;
+
   bool isConnected = false;
   bool isConnecting = false;
+  bool isLocked = false;
   int batteryPercent = 0;
   double currentSpeed = 0.0;
+
   Position? currentPosition;
   Timer? syncTimer;
   StreamSubscription? _scanSubscription;
@@ -82,7 +96,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     });
   }
 
-  Future<void> _connectToBike() async {
+  Future<void> _startScanAndConnect() async {
     if (isConnecting) return;
     setState(() => isConnecting = true);
 
@@ -91,7 +105,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       await _scanSubscription?.cancel();
 
       List<BluetoothDevice> scannedDevices = [];
-
       await FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
 
       _scanSubscription = FlutterBluePlus.scanResults.listen((results) {
@@ -107,9 +120,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         if (mounted) setState(() => isConnecting = false);
 
         if (scannedDevices.isEmpty) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("No Bluetooth devices found near you.")),
-          );
+          _showToast("No BLE devices found. Make sure bike is turned ON.");
           return;
         }
 
@@ -117,16 +128,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
       });
     } catch (e) {
       if (mounted) setState(() => isConnecting = false);
-      debugPrint("Connection error: $e");
+      _showToast("Scan Error: $e");
     }
   }
 
   void _showDeviceSelectionDialog(List<BluetoothDevice> devices) {
     showDialog(
       context: context,
-      builder: (BuildContext context) {
+      builder: (context) {
         return AlertDialog(
-          title: const Text("Select Your Bike"),
+          backgroundColor: const Color(0xFF1E293B),
+          title: const Text("Select E-Bike Device"),
           content: SizedBox(
             width: double.maxFinite,
             child: ListView.builder(
@@ -136,12 +148,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 final device = devices[index];
                 String name = device.platformName.isNotEmpty ? device.platformName : "Unknown Device";
                 return ListTile(
-                  leading: const Icon(Icons.bluetooth, color: Colors.tealAccent),
+                  leading: const Icon(Icons.two_wheeler, color: Colors.tealAccent),
                   title: Text(name),
                   subtitle: Text(device.remoteId.str),
                   onTap: () {
                     Navigator.pop(context);
-                    _connectToSelectedDevice(device);
+                    _connectToDevice(device);
                   },
                 );
               },
@@ -152,11 +164,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  Future<void> _connectToSelectedDevice(BluetoothDevice device) async {
+  Future<void> _connectToDevice(BluetoothDevice device) async {
     setState(() => isConnecting = true);
     try {
       bikeDevice = device;
       await bikeDevice!.connect(timeout: const Duration(seconds: 10));
+
+      await _setupServicesAndNotify();
 
       if (mounted) {
         setState(() {
@@ -164,28 +178,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
           isConnecting = false;
         });
       }
-
-      _setupNotify();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Connected to ${device.platformName}!")),
-      );
+      _showToast("Connected to ${device.platformName}!");
     } catch (e) {
       if (mounted) setState(() => isConnecting = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Failed to connect: $e")),
-      );
+      _showToast("Connection failed: $e");
     }
   }
 
-  void _setupNotify() async {
+  Future<void> _setupServicesAndNotify() async {
     if (bikeDevice == null) return;
     try {
       List<BluetoothService> services = await bikeDevice!.discoverServices();
-
       for (BluetoothService service in services) {
         if (service.uuid.toString().toLowerCase() == serviceUUID.toLowerCase()) {
           for (BluetoothCharacteristic c in service.characteristics) {
-            if (c.uuid.toString().toLowerCase() == notifyUUID.toLowerCase()) {
+            String charUuid = c.uuid.toString().toLowerCase();
+
+            if (charUuid == notifyUUID.toLowerCase()) {
               await c.setNotifyValue(true);
               c.lastValueStream.listen((value) {
                 if (value.isNotEmpty && mounted) {
@@ -194,33 +203,66 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   });
                 }
               });
+            } else if (charUuid == writeUUID.toLowerCase()) {
+              writeCharacteristic = c;
             }
           }
         }
       }
     } catch (e) {
-      debugPrint("Notify setup error: $e");
+      debugPrint("Services Setup Error: $e");
+    }
+  }
+
+  Future<void> _toggleLockState(bool lock) async {
+    if (!isConnected || writeCharacteristic == null) {
+      _showToast("Bike not connected!");
+      return;
+    }
+
+    try {
+      List<int> command = lock ? [0xAA, 0x01, 0x01, 0xFF] : [0xAA, 0x01, 0x00, 0xFF];
+      await writeCharacteristic!.write(command, withoutResponse: false);
+
+      setState(() {
+        isLocked = lock;
+      });
+
+      _showToast(lock ? "Bike Locked Remotely!" : "Bike Unlocked!");
+    } catch (e) {
+      _showToast("Control Command Failed: $e");
     }
   }
 
   Future<void> _syncToVPS() async {
     if (currentPosition == null) return;
-
     try {
-      final response = await http.post(
-        Uri.parse(vpsUrl),
+      await http.post(
+        Uri.parse(vpsSyncUrl),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'batteryPercent': batteryPercent,
-          'isCharging': false,
           'speedKmH': currentSpeed.round(),
+          'isLocked': isLocked,
           'latitude': currentPosition!.latitude,
           'longitude': currentPosition!.longitude,
         }),
       );
-      debugPrint("VPS Sync Response: ${response.statusCode}");
     } catch (e) {
       debugPrint("VPS Sync Failed: $e");
+    }
+  }
+
+  Future<void> _openLiveMap() async {
+    final Uri url = Uri.parse(liveMapUrl);
+    if (!await launchUrl(url, mode: LaunchMode.externalApplication)) {
+      _showToast("Could not launch Map URL");
+    }
+  }
+
+  void _showToast(String msg) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
     }
   }
 
@@ -236,64 +278,112 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('E-Bike Live Panel'),
+        title: const Text('E-Bike Smart Command'),
         centerTitle: true,
         elevation: 0,
+        backgroundColor: const Color(0xFF0F172A),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.map, color: Colors.tealAccent),
+            onPressed: _openLiveMap,
+            tooltip: 'Live Map Tracking',
+          )
+        ],
       ),
       body: Padding(
-        padding: const EdgeInsets.all(24.0),
+        padding: const EdgeInsets.all(20.0),
         child: Column(
           children: [
             Card(
-              color: const Color(0xFF1E1E1E),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
               child: ListTile(
                 leading: Icon(
                   isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
                   color: isConnected ? Colors.tealAccent : Colors.redAccent,
                   size: 32,
                 ),
-                title: Text(isConnected ? "Bike Connected" : "Bike Disconnected"),
-                subtitle: Text(isConnected ? "Receiving live telemetry" : "Tap button to search"),
+                title: Text(
+                  isConnected ? "Bike Connected" : "Bike Disconnected",
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+                subtitle: Text(isConnected ? "Live telemetry synced" : "Tap to scan devices"),
                 trailing: isConnecting
-                    ? const SizedBox(
-                        width: 24,
-                        height: 24,
-                        child: CircularProgressIndicator(strokeWidth: 2.5),
-                      )
+                    ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2))
                     : ElevatedButton(
-                        onPressed: isConnected ? null : _connectToBike,
-                        child: Text(isConnected ? "Active" : "Connect"),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: isConnected ? Colors.redAccent : Colors.tealAccent,
+                          foregroundColor: Colors.black,
+                        ),
+                        onPressed: isConnected ? () => bikeDevice?.disconnect() : _startScanAndConnect,
+                        child: Text(isConnected ? "Disconnect" : "Connect"),
                       ),
               ),
             ),
-            const SizedBox(height: 30),
+            const SizedBox(height: 20),
+
             Expanded(
               child: Container(
                 width: double.infinity,
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  border: Border.all(color: Colors.tealAccent.withOpacity(0.3), width: 8),
+                  border: Border.all(
+                    color: isLocked ? Colors.redAccent : Colors.tealAccent.withOpacity(0.4),
+                    width: 8,
+                  ),
                 ),
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     Text(
                       currentSpeed.toStringAsFixed(0),
-                      style: const TextStyle(fontSize: 72, fontWeight: FontWeight.bold, color: Colors.tealAccent),
+                      style: TextStyle(
+                        fontSize: 72,
+                        fontWeight: FontWeight.bold,
+                        color: isLocked ? Colors.redAccent : Colors.tealAccent,
+                      ),
                     ),
-                    const Text("KM/H", style: TextStyle(fontSize: 18, color: Colors.grey)),
+                    const Text("KM/H", style: TextStyle(fontSize: 16, color: Colors.grey)),
                   ],
                 ),
               ),
             ),
-            const SizedBox(height: 30),
+            const SizedBox(height: 20),
+
             Row(
               children: [
-                _buildInfoCard("Battery", "$batteryPercent %", Icons.battery_charging_full, Colors.greenAccent),
-                const SizedBox(width: 15),
-                _buildInfoCard(
-                  "GPS Signal",
+                Expanded(
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.redAccent.withOpacity(0.8),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                    ),
+                    onPressed: isConnected ? () => _toggleLockState(true) : null,
+                    icon: const Icon(Icons.lock, color: Colors.white),
+                    label: const Text("LOCK BIKE", style: TextStyle(color: Colors.white)),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.teal,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                    ),
+                    onPressed: isConnected ? () => _toggleLockState(false) : null,
+                    icon: const Icon(Icons.lock_open, color: Colors.white),
+                    label: const Text("UNLOCK", style: TextStyle(color: Colors.white)),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 20),
+
+            Row(
+              children: [
+                _buildMetricCard("Battery", "$batteryPercent %", Icons.battery_charging_full, Colors.greenAccent),
+                const SizedBox(width: 12),
+                _buildMetricCard(
+                  "GPS Tracking",
                   currentPosition != null ? "Active" : "Searching",
                   Icons.location_on,
                   Colors.orangeAccent,
@@ -306,282 +396,22 @@ class _DashboardScreenState extends State<DashboardScreen> {
     );
   }
 
-  Widget _buildInfoCard(String title, String value, IconData icon, Color color) {
+  Widget _buildMetricCard(String title, String value, IconData icon, Color color) {
     return Expanded(
       child: Container(
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: const Color(0xFF1E1E1E),
+          color: const Color(0xFF1E293B),
           borderRadius: BorderRadius.circular(12),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(icon, color: color, size: 28),
-            const SizedBox(height: 10),
+            Icon(icon, color: color, size: 26),
+            const SizedBox(height: 8),
             Text(title, style: const TextStyle(color: Colors.grey, fontSize: 12)),
             const SizedBox(height: 4),
-            Text(value, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-          ],
-        ),
-      ),
-    );
-  }
-}
-  final String notifyUUID = "0000fff1-0000-1000-8000-00805f9b34fb";
-  final String vpsUrl = "http://93.127.133.163:3000/api/update-location";
-
-  BluetoothDevice? bikeDevice;
-  bool isConnected = false;
-  bool isConnecting = false;
-  int batteryPercent = 0;
-  double currentSpeed = 0.0;
-  Position? currentPosition;
-  Timer? syncTimer;
-  StreamSubscription? _scanSubscription;
-
-  @override
-  void initState() {
-    super.initState();
-    _initSystem();
-  }
-
-  Future<void> _initSystem() async {
-    await _requestPermissions();
-    _startLocationTracking();
-    syncTimer = Timer.periodic(const Duration(seconds: 5), (_) => _syncToVPS());
-  }
-
-  Future<void> _requestPermissions() async {
-    await [
-      Permission.bluetoothScan,
-      Permission.bluetoothConnect,
-      Permission.locationWhenInUse,
-    ].request();
-  }
-
-  void _startLocationTracking() {
-    Geolocator.getPositionStream(
-      locationSettings: const LocationSettings(
-        accuracy: LocationAccuracy.high,
-        distanceFilter: 1,
-      ),
-    ).listen((Position pos) {
-      if (mounted) {
-        setState(() {
-          currentPosition = pos;
-          currentSpeed = (pos.speed * 3.6).clamp(0.0, 120.0);
-        });
-      }
-    });
-  }
-
-  Future<void> _connectToBike() async {
-    if (isConnecting) return;
-
-    setState(() => isConnecting = true);
-
-    try {
-      // Clean up previous scan if running
-      await FlutterBluePlus.stopScan();
-      await _scanSubscription?.cancel();
-
-      // Start fresh scan with 6-second timeout
-      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 6));
-
-      _scanSubscription = FlutterBluePlus.scanResults.listen((results) async {
-        for (ScanResult r in results) {
-          String deviceName = r.device.platformName.toUpperCase();
-          String advName = r.advertisementData.advName.toUpperCase();
-          List<String> uuids = r.advertisementData.serviceUuids.map((e) => e.toString().toLowerCase()).toList();
-
-          bool isTargetBike = deviceName.contains("M1365") ||
-              advName.contains("M1365") ||
-              uuids.contains(serviceUUID.toLowerCase());
-
-          if (isTargetBike) {
-            await FlutterBluePlus.stopScan();
-            await _scanSubscription?.cancel();
-
-            bikeDevice = r.device;
-            await bikeDevice!.connect(timeout: const Duration(seconds: 10));
-
-            if (mounted) {
-              setState(() {
-                isConnected = true;
-                isConnecting = false;
-              });
-            }
-
-            _setupNotify();
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text("Bike Connected Successfully!")),
-            );
-            return;
-          }
-        }
-      });
-
-      // Reset loading state after scan timeout
-      Future.delayed(const Duration(seconds: 7), () {
-        if (mounted && isConnecting && !isConnected) {
-          setState(() => isConnecting = false);
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("Bike not found. Ensure Bike is ON and close by.")),
-          );
-        }
-      });
-    } catch (e) {
-      if (mounted) setState(() => isConnecting = false);
-      debugPrint("Connection error: $e");
-    }
-  }
-
-  void _setupNotify() async {
-    if (bikeDevice == null) return;
-    try {
-      List<BluetoothService> services = await bikeDevice!.discoverServices();
-
-      for (BluetoothService service in services) {
-        if (service.uuid.toString().toLowerCase() == serviceUUID.toLowerCase()) {
-          for (BluetoothCharacteristic c in service.characteristics) {
-            if (c.uuid.toString().toLowerCase() == notifyUUID.toLowerCase()) {
-              await c.setNotifyValue(true);
-              c.lastValueStream.listen((value) {
-                if (value.isNotEmpty && mounted) {
-                  setState(() {
-                    batteryPercent = value.length > 8 ? value[8] : batteryPercent;
-                  });
-                }
-              });
-            }
-          }
-        }
-      }
-    } catch (e) {
-      debugPrint("Notify setup error: $e");
-    }
-  }
-
-  Future<void> _syncToVPS() async {
-    if (currentPosition == null) return;
-
-    try {
-      final response = await http.post(
-        Uri.parse(vpsUrl),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          'batteryPercent': batteryPercent,
-          'isCharging': false,
-          'speedKmH': currentSpeed.round(),
-          'latitude': currentPosition!.latitude,
-          'longitude': currentPosition!.longitude,
-        }),
-      );
-      debugPrint("VPS Sync Response: ${response.statusCode}");
-    } catch (e) {
-      debugPrint("VPS Sync Failed: $e");
-    }
-  }
-
-  @override
-  void dispose() {
-    _scanSubscription?.cancel();
-    syncTimer?.cancel();
-    bikeDevice?.disconnect();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('E-Bike Live Panel'),
-        centerTitle: true,
-        elevation: 0,
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(24.0),
-        child: Column(
-          children: [
-            Card(
-              color: const Color(0xFF1E1E1E),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-              child: ListTile(
-                leading: Icon(
-                  isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
-                  color: isConnected ? Colors.tealAccent : Colors.redAccent,
-                  size: 32,
-                ),
-                title: Text(isConnected ? "Bike Connected" : "Bike Disconnected"),
-                subtitle: Text(isConnected ? "Receiving live telemetry" : "Tap button to search"),
-                trailing: isConnecting
-                    ? const SizedBox(
-                        width: 24,
-                        height: 24,
-                        child: CircularProgressIndicator(strokeWidth: 2.5),
-                      )
-                    : ElevatedButton(
-                        onPressed: isConnected ? null : _connectToBike,
-                        child: Text(isConnected ? "Active" : "Connect"),
-                      ),
-              ),
-            ),
-            const SizedBox(height: 30),
-            Expanded(
-              child: Container(
-                width: double.infinity,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  border: Border.all(color: Colors.tealAccent.withOpacity(0.3), width: 8),
-                ),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(
-                      currentSpeed.toStringAsFixed(0),
-                      style: const TextStyle(fontSize: 72, fontWeight: FontWeight.bold, color: Colors.tealAccent),
-                    ),
-                    const Text("KM/H", style: TextStyle(fontSize: 18, color: Colors.grey)),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 30),
-            Row(
-              children: [
-                _buildInfoCard("Battery", "$batteryPercent %", Icons.battery_charging_full, Colors.greenAccent),
-                const SizedBox(width: 15),
-                _buildInfoCard(
-                  "GPS Signal",
-                  currentPosition != null ? "Active" : "Searching",
-                  Icons.location_on,
-                  Colors.orangeAccent,
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildInfoCard(String title, String value, IconData icon, Color color) {
-    return Expanded(
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: const Color(0xFF1E1E1E),
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Icon(icon, color: color, size: 28),
-            const SizedBox(height: 10),
-            Text(title, style: const TextStyle(color: Colors.grey, fontSize: 12)),
-            const SizedBox(height: 4),
-            Text(value, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+            Text(value, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
           ],
         ),
       ),
