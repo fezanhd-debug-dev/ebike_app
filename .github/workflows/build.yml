@@ -88,44 +88,75 @@ jobs:
 
       - name: Enable Core Library Desugaring
         run: |
-          KTS="android/app/build.gradle.kts"
-          GRADLE="android/app/build.gradle"
+          python3 << 'PYEOF'
+          import re, os
 
-          if [ -f "$KTS" ]; then
-            if ! grep -q "isCoreLibraryDesugaringEnabled" "$KTS"; then
-              sed -i '/compileOptions {/a\        isCoreLibraryDesugaringEnabled = true' "$KTS"
-            fi
-            if ! grep -q "coreLibraryDesugaring(" "$KTS"; then
-              if grep -q "^dependencies {" "$KTS"; then
-                sed -i '/^dependencies {/a\    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")' "$KTS"
-              else
-                cat >> "$KTS" << 'EOF'
+          def patch_groovy(path):
+              with open(path) as f:
+                  content = f.read()
 
-          dependencies {
-              coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
-          }
-          EOF
-              fi
-            fi
-          fi
+              if "coreLibraryDesugaringEnabled" not in content:
+                  content = re.sub(
+                      r'(compileOptions\s*\{)',
+                      r'\1\n        coreLibraryDesugaringEnabled true',
+                      content, count=1
+                  )
 
-          if [ -f "$GRADLE" ]; then
-            if ! grep -q "coreLibraryDesugaringEnabled" "$GRADLE"; then
-              sed -i '/compileOptions {/a\        coreLibraryDesugaringEnabled true' "$GRADLE"
-            fi
-            if ! grep -q "coreLibraryDesugaring " "$GRADLE"; then
-              if grep -q "^dependencies {" "$GRADLE"; then
-                sed -i '/^dependencies {/a\    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.4"' "$GRADLE"
-              else
-                cat >> "$GRADLE" << 'EOF'
+              if "coreLibraryDesugaring " not in content and 'coreLibraryDesugaring "' not in content:
+                  if re.search(r'\bdependencies\s*\{', content):
+                      content = re.sub(
+                          r'(dependencies\s*\{)',
+                          r'\1\n    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.4"',
+                          content, count=1
+                      )
+                  else:
+                      content += '\n\ndependencies {\n    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.4"\n}\n'
 
-          dependencies {
-              coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.4"
-          }
-          EOF
-              fi
-            fi
-          fi
+              with open(path, "w") as f:
+                  f.write(content)
+
+          def patch_kts(path):
+              with open(path) as f:
+                  content = f.read()
+
+              if "isCoreLibraryDesugaringEnabled" not in content:
+                  content = re.sub(
+                      r'(compileOptions\s*\{)',
+                      r'\1\n        isCoreLibraryDesugaringEnabled = true',
+                      content, count=1
+                  )
+
+              if "coreLibraryDesugaring(" not in content:
+                  if re.search(r'\bdependencies\s*\{', content):
+                      content = re.sub(
+                          r'(dependencies\s*\{)',
+                          r'\1\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")',
+                          content, count=1
+                      )
+                  else:
+                      content += '\n\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")\n}\n'
+
+              with open(path, "w") as f:
+                  f.write(content)
+
+          gradle_path = "android/app/build.gradle"
+          kts_path = "android/app/build.gradle.kts"
+
+          if os.path.exists(gradle_path):
+              patch_groovy(gradle_path)
+              print("Patched build.gradle")
+
+          if os.path.exists(kts_path):
+              patch_kts(kts_path)
+              print("Patched build.gradle.kts")
+          PYEOF
+
+      - name: Debug - Show Gradle File
+        run: |
+          echo "===== build.gradle ====="
+          cat android/app/build.gradle 2>/dev/null || echo "NOT FOUND"
+          echo "===== build.gradle.kts ====="
+          cat android/app/build.gradle.kts 2>/dev/null || echo "NOT FOUND"
 
       - name: Get Dependencies
         run: flutter pub get
