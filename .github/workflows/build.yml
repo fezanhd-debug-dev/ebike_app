@@ -22,10 +22,10 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Create Base Project
+      - name: Create Base Project Structure
         run: flutter create --org com.ebike .
 
-      - name: Configure Android Manifest Permissions
+      - name: Configure Android Permissions and MinSDK
         run: |
           cat << 'EOF' > android/app/src/main/AndroidManifest.xml
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
@@ -66,20 +66,11 @@ jobs:
           </manifest>
           EOF
 
-      - name: Set Android MinSdk
-        run: |
-          if [ -f android/app/build.gradle ]; then
-            sed -i 's/minSdkVersion .*/minSdkVersion 21/' android/app/build.gradle
-          fi
-          if [ -f android/app/build.gradle.kts ]; then
-            sed -i 's/minSdk = .*/minSdk = 21/' android/app/build.gradle.kts
-          fi
-
-      - name: Get Dependencies
+      - name: Get Flutter Dependencies
         run: flutter pub get
 
-      - name: Build APK
-        run: flutter build apk --release --no-tree-shake-icons
+      - name: Build Android Release APK
+        run: flutter build apk --release --no-tree-shake-icons --extra-front-end-options=--no-implicit-casts
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
