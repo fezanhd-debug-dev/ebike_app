@@ -88,20 +88,42 @@ jobs:
 
       - name: Enable Core Library Desugaring
         run: |
-          if [ -f android/app/build.gradle ]; then
-            if ! grep -q "coreLibraryDesugaringEnabled" android/app/build.gradle; then
-              sed -i '/compileOptions {/a\        coreLibraryDesugaringEnabled true' android/app/build.gradle
+          KTS="android/app/build.gradle.kts"
+          GRADLE="android/app/build.gradle"
+
+          if [ -f "$KTS" ]; then
+            if ! grep -q "isCoreLibraryDesugaringEnabled" "$KTS"; then
+              sed -i '/compileOptions {/a\        isCoreLibraryDesugaringEnabled = true' "$KTS"
             fi
-            if ! grep -q "desugar_jdk_libs" android/app/build.gradle; then
-              sed -i '/dependencies {/a\    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.4"' android/app/build.gradle
+            if ! grep -q "coreLibraryDesugaring(" "$KTS"; then
+              if grep -q "^dependencies {" "$KTS"; then
+                sed -i '/^dependencies {/a\    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")' "$KTS"
+              else
+                cat >> "$KTS" << 'EOF'
+
+          dependencies {
+              coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
+          }
+          EOF
+              fi
             fi
           fi
-          if [ -f android/app/build.gradle.kts ]; then
-            if ! grep -q "isCoreLibraryDesugaringEnabled" android/app/build.gradle.kts; then
-              sed -i '/compileOptions {/a\        isCoreLibraryDesugaringEnabled = true' android/app/build.gradle.kts
+
+          if [ -f "$GRADLE" ]; then
+            if ! grep -q "coreLibraryDesugaringEnabled" "$GRADLE"; then
+              sed -i '/compileOptions {/a\        coreLibraryDesugaringEnabled true' "$GRADLE"
             fi
-            if ! grep -q "desugar_jdk_libs" android/app/build.gradle.kts; then
-              sed -i '/dependencies {/a\    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")' android/app/build.gradle.kts
+            if ! grep -q "coreLibraryDesugaring " "$GRADLE"; then
+              if grep -q "^dependencies {" "$GRADLE"; then
+                sed -i '/^dependencies {/a\    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.4"' "$GRADLE"
+              else
+                cat >> "$GRADLE" << 'EOF'
+
+          dependencies {
+              coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.4"
+          }
+          EOF
+              fi
             fi
           fi
 
