@@ -25,7 +25,13 @@ jobs:
       - name: Create Base Project Structure
         run: flutter create --org com.ebike .
 
-      - name: Configure Android Permissions and MinSDK
+      - name: Fix Android MinSDK and Config
+        run: |
+          sed -i 's/minSdk = .*/minSdk = 21/' android/app/build.gradle.kts || true
+          sed -i 's/minSdkVersion .*/minSdkVersion 21/' android/app/build.gradle || true
+          sed -i 's/flutter.minSdkVersion/21/' android/app/build.gradle || true
+
+      - name: Configure Android Manifest Permissions
         run: |
           cat << 'EOF' > android/app/src/main/AndroidManifest.xml
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
@@ -66,11 +72,11 @@ jobs:
           </manifest>
           EOF
 
-      - name: Get Flutter Dependencies
+      - name: Get Dependencies
         run: flutter pub get
 
       - name: Build Android Release APK
-        run: flutter build apk --release --no-tree-shake-icons --extra-front-end-options=--no-implicit-casts
+        run: flutter build apk --release --no-tree-shake-icons
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
